@@ -1,9 +1,8 @@
-import './instrument';
+import Sentry from './instrument';
 import * as grpc from '@grpc/grpc-js';
 import * as protoLoader from '@grpc/proto-loader';
 import { PrismaClient } from '@prisma/client';
 import path from 'path';
-import * as Sentry from '@sentry/node';
 import { grpcInternalErrorMessage, grpcNotFoundErrorMessage } from './errors';
 import { Product, ProductList, GetProductRequest, GrpcCall, GrpcCallback } from './types/grpc';
 // Load the protobuf
@@ -26,37 +25,52 @@ const proto = grpc.loadPackageDefinition(packageDefinition) as unknown as ProtoT
 const prisma = new PrismaClient();
 
 function timingInterceptor(methodDescriptor: any, nextCall: any) {
-  //print metadata
-  console.log('metadataInterceptor:', nextCall.metadata.getMap());
-  const startTime = process.hrtime();
-  console.log(`[Timing] ${methodDescriptor.path} started`);
+  const metadata = nextCall.metadata.getMap();
+  const sentryTrace = metadata['sentry-trace'];
+  const baggage = metadata['baggage'];
 
   return new grpc.ServerInterceptingCall(nextCall, {
     start: (next) => {
-      next();
+      // Continue the trace using the extracted context
+      Sentry.continueTrace({ sentryTrace, baggage }, () => {
+        // Start a new span for this request
+        Sentry.startSpan(
+          {
+            name: methodDescriptor.path,
+            op: 'grpc.server',
+            attributes: {
+              'grpc.method': methodDescriptor.path,
+              'grpc.service': 'product.ProductService',
+              'grpc.status_code': grpc.status.OK,
+              'grpc.status_description': 'OK',
+              'grpc.userId': metadata['userid'] || 'anonymous'
+            },
+          },
+          (span) => {
+            // Store span in the call context for later use
+            nextCall.span = span;
+            next();
+          }
+        );
+      });
     },
     sendMessage: (message, next) => {
       next(message);
     },
     sendStatus: (status, next) => {
-      console.log('status: ', status);
-      const endTime = process.hrtime(startTime);
-      const duration = (endTime[0] * 1000 + endTime[1] / 1000000).toFixed(2);
-      console.log(`[Timing] ${methodDescriptor.path} took ${duration}ms`);
+      // Capture failures if needed
+      if (status.code !== grpc.status.OK) {
+        Sentry.captureException(new Error(`gRPC error: ${status.details}`));
+      }
       
-      // Track timing in Sentry
-      Sentry.addBreadcrumb({
-        category: 'grpc',
-        message: `${methodDescriptor.path} duration`,
-        data: {
-          duration: `${duration}ms`,
-          status: status.code,
-          path: methodDescriptor.path,
-          service: 'grpc-product-service', //maybe it is not necessary services is already in the path
-          userId: nextCall.metadata.get('userid') //check if we need to redact this
-        },
-        level: 'info'
-      });
+      // Finish the span
+      if (nextCall.span) {
+        nextCall.span.setStatus(status.code === grpc.status.OK ? 'ok' : 'error');
+        console.log('nextCall.span: ', nextCall.span);
+        
+        // nextCall.span.finish();
+      }
+      
       next(status);
     }
   });
@@ -73,13 +87,13 @@ const productService = {
         where: { id: Number(call.request.id) },
       });
       //intentional error to test sentry distributed tracing
-      throw new Error('This is a test error');
+      // throw new Error('This is a test error');
 
-      // if (!product) {
-      //   return callback(grpcNotFoundErrorMessage('Product not found'), null);
-      // }
+      if (!product) {
+        return callback(grpcNotFoundErrorMessage('Product not found'), null);
+      }
 
-      // callback(null, product as unknown as Product);
+      callback(null, product as unknown as Product);
     } catch (error) {
       Sentry.captureException(error);
       console.error('Error in getProduct:', error);
@@ -120,7 +134,6 @@ const productService = {
   ) => {
     try {
       const products = await prisma.product.findMany();
-      throw new Error('This is a test error');
       const mappedProducts = products.map(p => ({ ...p, id: String(p.id) } as unknown as Product));
       callback(null, { products: mappedProducts });
     } catch (error) {
