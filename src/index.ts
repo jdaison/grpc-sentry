@@ -65,10 +65,8 @@ function timingInterceptor(methodDescriptor: any, nextCall: any) {
       
       // Finish the span
       if (nextCall.span) {
-        nextCall.span.setStatus(status.code === grpc.status.OK ? 'ok' : 'error');
-        console.log('nextCall.span: ', nextCall.span);
-        
-        // nextCall.span.finish();
+        nextCall.span.setStatus(status.code === grpc.status.OK ? 'ok' : 'error'); 
+        nextCall.span.end();
       }
       
       next(status);
