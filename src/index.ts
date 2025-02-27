@@ -111,7 +111,6 @@ const productService = {
   ) => {
     try {
       const tx = call.call?.nextCall?.trx;
-      console.log('tx: ', tx);
       await Sentry.withActiveSpan(tx, async () => {
         const products = await prisma.product.findMany();
 
