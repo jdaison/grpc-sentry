@@ -6,11 +6,9 @@ dotenv.config();
 
 Sentry.init({
     dsn: process.env.SENTRY_DSN,
-    serverName: 'grpc-product-service',
-    debug: true,
     integrations: [
         nodeProfilingIntegration(),
-        Sentry.prismaIntegration(),
+        Sentry.koaIntegration(),
     ],
     tracesSampleRate: 1.0,
 });
