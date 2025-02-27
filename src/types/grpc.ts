@@ -15,5 +15,14 @@ export interface GetProductRequest {
   id: string;
 }
 
+interface NextCall {
+  trx?: any; 
+}
+interface CallExtension {
+  nextCall?: NextCall;
+}
+
 export type GrpcCallback<T> = sendUnaryData<T>;
-export type GrpcCall<T> = ServerUnaryCall<T, any>;
+export type GrpcCall<T> = ServerUnaryCall<T, any> & {
+  call?: CallExtension;
+};

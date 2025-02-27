@@ -4,7 +4,8 @@ import * as protoLoader from '@grpc/proto-loader';
 import { PrismaClient } from '@prisma/client';
 import path from 'path';
 import { grpcInternalErrorMessage, grpcNotFoundErrorMessage } from './errors';
-import { Product, ProductList, GetProductRequest, GrpcCall, GrpcCallback } from './types/grpc';
+import { Product, ProductList,  GetProductRequest, GrpcCall, GrpcCallback } from './types/grpc';
+
 // Load the protobuf
 const PROTO_PATH = path.join(__dirname, 'product.proto');
 const packageDefinition = protoLoader.loadSync(PROTO_PATH, {
@@ -33,13 +34,12 @@ function timingInterceptor(methodDescriptor: any, nextCall: any) {
     start: (next) => {
       // Continue the trace using the extracted context
       Sentry.continueTrace({ sentryTrace, baggage }, () => {
-
-        
-        // Start a new span for this request
-        Sentry.startSpan(
+        //1 Start a new span for this request as a transaction (forceTransaction: true)
+        Sentry.startSpanManual( // important: needs to be manual or it will be closed before the gRPC call ends
           {
             name: methodDescriptor.path,
             op: 'grpc.server',
+            forceTransaction: true, // important: force transaction
             attributes: {
               'grpc.method': methodDescriptor.path,
               'grpc.service': 'product.ProductService',
@@ -48,10 +48,10 @@ function timingInterceptor(methodDescriptor: any, nextCall: any) {
               'grpc.userId': metadata['userid'] || 'anonymous'
             },
           },
-          (span) => {
-            // Store span in the call context for later use
-            console.log('span: ', span);
-            nextCall.span = span;
+          (trx) => {
+            // 2. Store transaction in the call context for later use
+            nextCall.trx = trx;
+            // 3. Continue
             next();
           }
         );
@@ -61,20 +61,18 @@ function timingInterceptor(methodDescriptor: any, nextCall: any) {
       next(message);
     },
     sendStatus: (status, next) => {
-      // Capture failures if needed
       if (status.code !== grpc.status.OK) {
         Sentry.captureException(new Error(`gRPC error: ${status.details}`));
       }
+      // 4. close the transaction
+      const tx = nextCall.trx;
 
-      // Finish the span
-      if (nextCall.span) {
-        console.log(' Finishing the span: ');
-        nextCall.span.setStatus(status.code === grpc.status.OK ? 'ok' : 'error');
-        nextCall.span.end();
+      if (tx) {
+        tx.setStatus(status.code === grpc.status.OK ? 'ok' : 'error');
+        tx.end();
       }
-
       next(status);
-    }
+    },
   });
 }
 
@@ -85,63 +83,25 @@ const productService = {
     callback: GrpcCallback<Product>
   ) => {
     try {
-      const product = await Sentry.startSpan(
-        {
-          name: 'prisma.product.findUnique',
-          op: 'db.query',
-          attributes: {
-            'db.system': 'prisma',
-            'db.operation': 'findUnique',
-            'db.table': 'product',
-            'product.id': call.request.id,
-          },
-        },
-        async () => {
-          return await prisma.product.findUnique({
-            where: { id: Number(call.request.id) },
-          });
-        }
-      );
+      const tx = call.call?.nextCall?.trx;
+      await Sentry.withActiveSpan(tx, async () => {
+        const product = await prisma.product.findUnique({
+          where: { id: Number(call.request.id) },
+        });;
 
       //intentional error to test sentry distributed tracing
-      // throw new Error('This is a test error');
+      throw new Error('This is a test error');
 
-      if (!product) {
-        return callback(grpcNotFoundErrorMessage('Product not found'), null);
-      }
+      // if (!product) {
+      //   return callback(grpcNotFoundErrorMessage('Product not found'), null);
+      // }
 
-      callback(null, product as unknown as Product);
+      // callback(null, product as unknown as Product);
+      });
     } catch (error) {
       Sentry.captureException(error);
-      console.error('Error in getProduct:', error);
-      callback(grpcInternalErrorMessage(error instanceof Error ? error.message : 'Unknown error'), null);
-    }
-  },
-
-  updateProduct: async (
-    call: GrpcCall<Product>,
-    callback: GrpcCallback<Product>
-  ) => {
-    try {
-      const existingProduct = await prisma.product.findUnique({
-        // where: { id: call.request.productId }, // it is call.request.id but it is wrong intentionally error to test Sentry
-        where: { id: Number(call.request.id) }, // it is call.request.id but it is wrong intentionally error to test Sentry
-
-      });
-
-      if (!existingProduct) {
-        return callback(grpcNotFoundErrorMessage('Product not found for update'));
-      }
-
-      const { id, ...updateData } = call.request;
-      const product = await prisma.product.update({
-        where: { id: Number(id) },
-        data: updateData,
-      });
-      callback(null, product as unknown as Product);
-    } catch (error) {
-      Sentry.captureException(error);
-      callback(grpcInternalErrorMessage(`Failed to update product: ${(error as any).message}`));
+      console.error('Error in findProducts:', error);
+      callback(grpcInternalErrorMessage(`Failed to fetch products: ${(error as any).message}`));
     }
   },
 
@@ -150,24 +110,10 @@ const productService = {
     callback: GrpcCallback<ProductList>
   ) => {
     try {
-
-      const parentSpan = call.call?.nextCall?.span;
-      await Sentry.withActiveSpan(parentSpan, async () => {
-        const products = await Sentry.startSpan(
-          {
-            name: 'prisma.product.findMany',
-            op: 'db.query',
-            attributes: {
-              'db.system': 'prisma',
-              'db.operation': 'findMany',
-              'db.table': 'product',
-              'request': call.request,
-            },
-          },
-          async () => {
-            return await prisma.product.findMany();
-          }
-        );
+      const tx = call.call?.nextCall?.trx;
+      console.log('tx: ', tx);
+      await Sentry.withActiveSpan(tx, async () => {
+        const products = await prisma.product.findMany();
 
         const mappedProducts = products.map(p => ({ ...p, id: String(p.id) } as unknown as Product));
         callback(null, { products: mappedProducts });
@@ -180,7 +126,6 @@ const productService = {
   },
 };
 
-
 // Define gRPC server
 const server = new grpc.Server(
   {
@@ -192,8 +137,8 @@ const server = new grpc.Server(
 server.addService(proto.product.ProductService.service, productService);
 
 // Start the gRPC server
-const port = '0.0.0.0:50051';
-server.bindAsync(port, grpc.ServerCredentials.createInsecure(), (error, port) => {
+const url = '0.0.0.0:50051';
+server.bindAsync(url, grpc.ServerCredentials.createInsecure(), (error, port) => {
   if (error) {
     Sentry.captureException(error);
     console.error('Failed to start server:', error);
