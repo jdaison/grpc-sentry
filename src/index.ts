@@ -33,6 +33,8 @@ function timingInterceptor(methodDescriptor: any, nextCall: any) {
     start: (next) => {
       // Continue the trace using the extracted context
       Sentry.continueTrace({ sentryTrace, baggage }, () => {
+
+        
         // Start a new span for this request
         Sentry.startSpan(
           {
@@ -48,6 +50,7 @@ function timingInterceptor(methodDescriptor: any, nextCall: any) {
           },
           (span) => {
             // Store span in the call context for later use
+            console.log('span: ', span);
             nextCall.span = span;
             next();
           }
@@ -62,13 +65,14 @@ function timingInterceptor(methodDescriptor: any, nextCall: any) {
       if (status.code !== grpc.status.OK) {
         Sentry.captureException(new Error(`gRPC error: ${status.details}`));
       }
-      
+
       // Finish the span
       if (nextCall.span) {
-        nextCall.span.setStatus(status.code === grpc.status.OK ? 'ok' : 'error'); 
+        console.log(' Finishing the span: ');
+        nextCall.span.setStatus(status.code === grpc.status.OK ? 'ok' : 'error');
         nextCall.span.end();
       }
-      
+
       next(status);
     }
   });
@@ -81,9 +85,24 @@ const productService = {
     callback: GrpcCallback<Product>
   ) => {
     try {
-      const product = await prisma.product.findUnique({
-        where: { id: Number(call.request.id) },
-      });
+      const product = await Sentry.startSpan(
+        {
+          name: 'prisma.product.findUnique',
+          op: 'db.query',
+          attributes: {
+            'db.system': 'prisma',
+            'db.operation': 'findUnique',
+            'db.table': 'product',
+            'product.id': call.request.id,
+          },
+        },
+        async () => {
+          return await prisma.product.findUnique({
+            where: { id: Number(call.request.id) },
+          });
+        }
+      );
+
       //intentional error to test sentry distributed tracing
       // throw new Error('This is a test error');
 
@@ -107,7 +126,7 @@ const productService = {
       const existingProduct = await prisma.product.findUnique({
         // where: { id: call.request.productId }, // it is call.request.id but it is wrong intentionally error to test Sentry
         where: { id: Number(call.request.id) }, // it is call.request.id but it is wrong intentionally error to test Sentry
-        
+
       });
 
       if (!existingProduct) {
@@ -127,13 +146,32 @@ const productService = {
   },
 
   findProducts: async (
-    call: GrpcCall<{}>,
+    call: any,
     callback: GrpcCallback<ProductList>
   ) => {
     try {
-      const products = await prisma.product.findMany();
-      const mappedProducts = products.map(p => ({ ...p, id: String(p.id) } as unknown as Product));
-      callback(null, { products: mappedProducts });
+
+      const parentSpan = call.call?.nextCall?.span;
+      await Sentry.withActiveSpan(parentSpan, async () => {
+        const products = await Sentry.startSpan(
+          {
+            name: 'prisma.product.findMany',
+            op: 'db.query',
+            attributes: {
+              'db.system': 'prisma',
+              'db.operation': 'findMany',
+              'db.table': 'product',
+              'request': call.request,
+            },
+          },
+          async () => {
+            return await prisma.product.findMany();
+          }
+        );
+
+        const mappedProducts = products.map(p => ({ ...p, id: String(p.id) } as unknown as Product));
+        callback(null, { products: mappedProducts });
+      });
     } catch (error) {
       Sentry.captureException(error);
       console.error('Error in findProducts:', error);
