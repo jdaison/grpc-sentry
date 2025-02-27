@@ -14,7 +14,7 @@ Use [Koa project](https://github.com/jdaison/koa-sentry) to do request to this g
 1. Clone the repository:
 
 ```bash
-git clone https://github.com/yourusername/grpc-sentry.git
+git clone https://github.com/jdaison/grpc-sentry.git
 cd grpc-sentry
 ```
 
@@ -42,7 +42,9 @@ npm run dev
 This project includes distributed tracing using Sentry. Below are some example traces captured by Sentry:
 
 ### Tracing find products
+
 ![Trace find products](./images/trace_find_products.png)
 
 ### Tracing get product with error
+
 ![Tracing get product with error](./images/trace_get_product_with_error.png)
